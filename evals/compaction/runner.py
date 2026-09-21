@@ -212,6 +212,17 @@ def summarized_region(compressor_module, messages):
     return messages[head_end:tail_start]
 
 
+def load_question_bank(path: Path, n: int) -> list:
+    """Load a deterministic question bank without invoking any model."""
+    questions = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(questions, list) or not questions:
+        raise ValueError(f"question bank must be a non-empty JSON list: {path}")
+    for index, question in enumerate(questions[:n], start=1):
+        if not isinstance(question, dict) or not question.get("q") or "gold" not in question:
+            raise ValueError(f"invalid question bank entry {index}: expected q and gold")
+    return questions[:n]
+
+
 def generate_questions(messages, n: int, cache_path: Path) -> list:
     if cache_path.exists():
         return json.loads(cache_path.read_text(encoding="utf-8"))
@@ -416,6 +427,10 @@ def main():
                     help="comma-separated arms; <name>+recovery = production path (summary + one session_search round-trip). Bare <name> is closed-book, opt-in only.")
     ap.add_argument("--questions", type=int, default=15)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--question-bank", type=Path,
+                    help="JSON question bank; skips auxiliary question generation")
+    ap.add_argument("--scorecard", type=Path,
+                    help="scorecard output path (default: OUT/scorecard.json)")
     ap.add_argument("--also-uncompacted", action="store_true")
     args = ap.parse_args()
 
@@ -423,8 +438,12 @@ def main():
     out_dir = Path(args.out)
     tid = hashlib.md5(f"{args.transcript}@{args.cap_tokens}".encode()).hexdigest()[:10]
     qcache = out_dir / f"questions-{tid}.json"
-    questions = generate_questions(messages, args.questions, qcache)
-    print(f"{len(questions)} questions ready ({qcache})")
+    if args.question_bank:
+        questions = load_question_bank(args.question_bank, args.questions)
+        print(f"{len(questions)} deterministic questions loaded ({args.question_bank})")
+    else:
+        questions = generate_questions(messages, args.questions, qcache)
+        print(f"{len(questions)} questions ready ({qcache})")
 
     summaries = []
     if args.also_uncompacted:
@@ -464,9 +483,11 @@ def main():
         summaries.append(s)
         print(json.dumps(s, indent=1))
 
-    (out_dir / "scorecard.json").write_text(json.dumps(summaries, indent=1), encoding="utf-8")
+    scorecard_path = args.scorecard or (out_dir / "scorecard.json")
+    scorecard_path.parent.mkdir(parents=True, exist_ok=True)
+    scorecard_path.write_text(json.dumps(summaries, indent=1), encoding="utf-8")
     (out_dir / "eval_usage.json").write_text(json.dumps(EVAL_USAGE, indent=1), encoding="utf-8")
-    print(f"\nscorecard -> {out_dir}/scorecard.json")
+    print(f"\nscorecard -> {scorecard_path}")
     print(f"eval LLM usage (questions+answers+judge): {EVAL_USAGE}")
 
 

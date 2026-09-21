@@ -441,6 +441,8 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "recall_tags", "description": "Tags to filter when searching memories (comma-separated)", "default": ""},
             {"key": "recall_tags_match", "description": "Tag matching mode for recall", "default": "any", "choices": ["any", "all", "any_strict", "all_strict"]},
             {"key": "recall_types", "description": "Fact types to surface on recall — applies to both auto-recall and the hindsight_recall tool (comma-separated or list). Defaults to observation-only — observations are Hindsight's consolidated, deduplicated, evidence-grounded knowledge layer; raw world/experience facts are the supporting evidence observations already summarize. Set to e.g. 'observation,world,experience' to also include raw facts.", "default": "observation"},
+            {"key": "recall_prefer_observations", "description": "Drop raw facts already consolidated into an observation so the observation supersedes them (requires server >= 0.9.2). Auto-recall only, default off.", "default": False},
+            {"key": "recall_min_final_score", "description": "Relevance floor for auto-recall (0 = off). Results below this final score are not injected — weak matches are dropped instead of diluting context.", "default": 0},
             {"key": "auto_recall", "description": "Automatically recall memories before each turn", "default": True},
             {"key": "recall_sync", "description": "Recall synchronously against the current message before each turn (higher relevance, adds recall latency to the turn). Default off: recall runs in the background and is injected on the next turn.", "default": False},
             {"key": "recall_indicator", "description": "Show a '👁️ Hindsight — recalled N memories' status line when auto-recall injects memory (turn off for customer-facing agents)", "default": True},
@@ -786,6 +788,12 @@ class HindsightMemoryProvider(MemoryProvider):
         """Recall knobs are pure config too (``{}`` yields the defaults)."""
         self._recall_tags = cfg.get("recall_tags") or None
         self._recall_tags_match = cfg.get("recall_tags_match", "any")
+        # Prefetch quality gates (option 3): keep auto-recall but only
+        # inject high-signal, non-duplicated observations. 0 / absent =
+        # disabled (legacy behavior).
+        self._recall_prefer_observations = bool(cfg.get("recall_prefer_observations", False))
+        _min_final = cfg.get("recall_min_final_score", 0)
+        self._recall_min_final_score = float(_min_final) if _min_final else None
         self._auto_recall = cfg.get("auto_recall", True)
         self._recall_sync = bool(cfg.get("recall_sync", False))
         self._recall_max_tokens = int(cfg.get("recall_max_tokens", 4096))
@@ -891,6 +899,14 @@ class HindsightMemoryProvider(MemoryProvider):
             kwargs.update(tags=self._recall_tags, tags_match=self._recall_tags_match)
         if self._recall_types:
             kwargs["types"] = self._recall_types
+        # Local server (>= 0.9.2) accepts fields the in-tree client 0.6.1
+        # predates; sent only when configured. If the live server is older
+        # and rejects them, recall degrades to no results (logged), the
+        # same failure mode as other recall errors in _do_recall.
+        if self._recall_prefer_observations:
+            kwargs["prefer_observations"] = True
+        if self._recall_min_final_score is not None:
+            kwargs["min_scores"] = {"final": self._recall_min_final_score}
         resp = self._run_hindsight_operation(lambda client: client.arecall(**kwargs))
         return resp.results or []
 
